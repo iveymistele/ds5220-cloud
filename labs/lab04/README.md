@@ -40,7 +40,7 @@ touch provision_infrastructure.py
 
 ### Create a Python Environment
 
-- Create a virtual environment `pipenv`, `pyenv`, `uv`, or `virtualenv`
+- Create a virtual environment `pipenv`, `pyenv`, `uv`, `conda`, or `virtualenv`
 - Activate it in your terminal
 
 ### Install Required Libraries
