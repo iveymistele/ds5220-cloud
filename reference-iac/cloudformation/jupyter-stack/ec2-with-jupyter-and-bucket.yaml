@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation template that creates an EC2 instance with bootstrapping script, custom EBS volume, S3 bucket, and IAM role for bucket access
+
+Parameters:
+  InstanceType:
+    Description: The EC2 instance type
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+  KeyName:
+    Description: Name of an existing EC2 key pair to allow SSH access to the instances
+    Type: 'AWS::EC2::KeyPair::KeyName'
+  UvaId:
+    Description: Your UVA computing ID
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+
+Resources:
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EC2 instance allowing custom HTTP and SSH access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8888
+          ToPort: 8888
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTP traffic from anywhere
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: Allow SSH access
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-ec2-sg
+
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-ec2-role
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2InstanceRole
+
+  S3BucketAccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: S3BucketAccessPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+              - s3:ListAllMyBuckets
+            Resource:
+              - !Sub ${S3Bucket.Arn}/*
+              - !Sub ${S3Bucket.Arn}
+              - arn:aws:s3:::*
+      Roles:
+        - !Ref EC2InstanceRole
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${UvaId}-${AWS::StackName}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-bucket
+
+  # EC2 Instance
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0b6c6ebed2801a5cb
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+
+          apt update
+          
+          snap install docker
+          sleep 10
+          docker run -d --restart=always -p 8888:8888 quay.io/jupyter/base-notebook start-notebook.py --NotebookApp.token='my-token'
+
+          # add second ebs volume
+          mkfs.ext4 /dev/nvme1n1
+          mkdir -p /data
+          mount /dev/nvme1n1 /data
+          echo "/dev/nvme1n1  /data   ext4    default,nofail  0   2" >> /etc/fstab
+
+          # docker volume create --driver local --opt type=none --opt device=/data --opt o=bind jupyter-volume
+          docker run -d --restart always -p 8888:8888 quay.io/jupyter/base-notebook start-notebook.py --NotebookApp.token='my-token'
+          
+          echo "Completed bootstrapping"  
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-ec2-instance
+
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  ElasticIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref EC2Instance
+      EIP: !Ref ElasticIP
+
+  SecondEBSVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !GetAtt EC2Instance.AvailabilityZone
+      Size: 13
+      VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-second-ebs-volume
+    DeletionPolicy: Retain
+
+  AttachSecondEBSVolume:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref EC2Instance
+      VolumeId: !Ref SecondEBSVolume
+      Device: /dev/xvdf
+
+Outputs:
+  InstanceId:
+    Description: The EC2 instance ID
+    Value: !Ref EC2Instance
+    Export:
+      Name: !Sub ${AWS::StackName}-InstanceId
+
+  ElasticIPAddress:
+    Description: Elastic IP address of the EC2 instance
+    Value: !Ref ElasticIP
+
+  SecurityGroupId:
+    Description: The security group ID
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-SecurityGroupId
+
+  S3BucketName:
+    Description: The name of the S3 bucket
+    Value: !Ref S3Bucket
+    Export:
+      Name: !Sub ${UvaId}-${AWS::StackName}
+
+  IAMRoleArn:
+    Description: The IAM role ARN for the EC2 instance
+    Value: !GetAtt EC2InstanceRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-IAMRoleArn
